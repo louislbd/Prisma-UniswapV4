@@ -1,0 +1,447 @@
+// schema.prisma
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ============================================
+// CORE UNISWAP V4 ENTITIES
+// ============================================
+
+model Pool {
+  id              String   @id // keccak256(abi.encode(currency0, currency1, fee, tickSpacing, hooks))
+
+  // Pool Key components
+  token0          String   // currency0 address
+  token1          String   // currency1 address
+  fee             Int      // fee tier
+  tickSpacing     Int      // tick spacing
+  hooks           String   // hooks contract address (or zero address)
+
+  // Current pool state
+  sqrtPriceX96    String   // current price as sqrt(price) * 2^96
+  tick            Int      // current tick
+  liquidity       String   // total active liquidity (uint128)
+
+  // Protocol fees
+  protocolFee0    Int      @default(0) // protocol fee for token0
+  protocolFee1    Int      @default(0) // protocol fee for token1
+
+  // Metadata
+  createdAt       DateTime @default(now())
+  createdAtBlock  BigInt
+  updatedAt       DateTime @updatedAt
+
+  // Relations
+  positions       Position[]
+  swaps           Swap[]
+  liquidityMods   LiquidityModification[]
+  ticks           Tick[]
+  hookCalls       HookCall[]
+  campaigns       Campaign[]
+
+  @@index([token0, token1])
+  @@index([hooks])
+  @@index([createdAt])
+}
+
+model Position {
+  id              String   @id // keccak256(abi.encode(poolId, owner, tickLower, tickUpper, salt))
+
+  // Position identifiers
+  poolId          String
+  owner           String   // position owner address
+  tickLower       Int      // lower tick boundary
+  tickUpper       Int      // upper tick boundary
+  salt            String   @default("0") // salt for multiple positions same range
+
+  // Position state
+  liquidity       String   // position liquidity amount (uint128)
+
+  // Fees owed (uncollected)
+  tokensOwed0     String   @default("0")
+  tokensOwed1     String   @default("0")
+
+  // Fee growth tracking (for fee calculation)
+  feeGrowthInside0LastX128 String @default("0")
+  feeGrowthInside1LastX128 String @default("0")
+
+  // Metadata
+  createdAt       DateTime @default(now())
+  createdAtBlock  BigInt
+  updatedAt       DateTime @updatedAt
+  closedAt        DateTime? // null if still open
+
+  // Relations
+  pool            Pool     @relation(fields: [poolId], references: [id], onDelete: Cascade)
+  modifications   LiquidityModification[]
+  snapshots       PositionSnapshot[]
+  rewards         RewardDistribution[]
+
+  @@index([poolId])
+  @@index([owner])
+  @@index([poolId, owner])
+  @@index([createdAt])
+}
+
+model Swap {
+  id              String   @id @default(cuid())
+
+  // Transaction details
+  txHash          String
+  logIndex        Int
+  blockNumber     BigInt
+  timestamp       DateTime
+
+  // Pool reference
+  poolId          String
+
+  // Swap participants
+  sender          String   // address that initiated swap
+  recipient       String   // address that received output
+
+  // Swap amounts (negative = out, positive = in)
+  amount0         String   // delta token0
+  amount1         String   // delta token1
+
+  // Pool state after swap
+  sqrtPriceX96    String   // price after swap
+  liquidity       String   // liquidity at time of swap
+  tick            Int      // tick after swap
+
+  // Fee paid
+  fee0            String   @default("0") // fee in token0
+  fee1            String   @default("0") // fee in token1
+
+  // Relations
+  pool            Pool     @relation(fields: [poolId], references: [id], onDelete: Cascade)
+
+  @@unique([txHash, logIndex])
+  @@index([poolId])
+  @@index([timestamp])
+  @@index([blockNumber])
+  @@index([sender])
+  @@index([poolId, timestamp])
+}
+
+model LiquidityModification {
+  id              String   @id @default(cuid())
+
+  // Transaction details
+  txHash          String
+  logIndex        Int
+  blockNumber     BigInt
+  timestamp       DateTime
+
+  // Position reference
+  poolId          String
+  positionId      String?  // null for first mint before position created
+  owner           String
+  tickLower       Int
+  tickUpper       Int
+
+  // Modification details
+  liquidityDelta  String   // change in liquidity (can be negative for burns)
+  amount0         String   // token0 amount added/removed
+  amount1         String   // token1 amount added/removed
+
+  // Type
+  type            ModificationType // MINT or BURN
+
+  // Relations
+  pool            Pool     @relation(fields: [poolId], references: [id], onDelete: Cascade)
+  position        Position? @relation(fields: [positionId], references: [id], onDelete: Cascade)
+
+  @@unique([txHash, logIndex])
+  @@index([poolId])
+  @@index([positionId])
+  @@index([owner])
+  @@index([timestamp])
+  @@index([poolId, timestamp])
+}
+
+enum ModificationType {
+  MINT
+  BURN
+}
+
+model Tick {
+  // Composite key
+  poolId          String
+  tick            Int
+
+  // Tick state
+  liquidityGross  String   // total liquidity referencing this tick
+  liquidityNet    String   // net liquidity change at this tick
+
+  // Fee growth outside this tick
+  feeGrowthOutside0X128 String @default("0")
+  feeGrowthOutside1X128 String @default("0")
+
+  // Metadata
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  // Relations
+  pool            Pool     @relation(fields: [poolId], references: [id], onDelete: Cascade)
+
+  @@id([poolId, tick])
+  @@index([poolId])
+}
+
+model HookCall {
+  id              String   @id @default(cuid())
+
+  // Transaction details
+  txHash          String
+  logIndex        Int
+  blockNumber     BigInt
+  timestamp       DateTime
+
+  // Pool reference
+  poolId          String
+  hookAddress     String
+
+  // Hook details
+  hookType        HookType // which hook was called
+  hookData        String?  // custom data passed to hook (hex)
+  success         Boolean  // whether hook executed successfully
+  gasUsed         Int?     // gas consumed by hook
+
+  // Relations
+  pool            Pool     @relation(fields: [poolId], references: [id], onDelete: Cascade)
+
+  @@unique([txHash, logIndex])
+  @@index([poolId])
+  @@index([hookAddress])
+  @@index([hookType])
+  @@index([timestamp])
+  @@index([poolId, hookAddress])
+}
+
+enum HookType {
+  BEFORE_INITIALIZE
+  AFTER_INITIALIZE
+  BEFORE_ADD_LIQUIDITY
+  AFTER_ADD_LIQUIDITY
+  BEFORE_REMOVE_LIQUIDITY
+  AFTER_REMOVE_LIQUIDITY
+  BEFORE_SWAP
+  AFTER_SWAP
+  BEFORE_DONATE
+  AFTER_DONATE
+}
+
+// ============================================
+// INCENTIVIZATION ENGINE
+// ============================================
+
+model Campaign {
+  id              String   @id @default(cuid())
+
+  // Campaign basics
+  name            String
+  description     String?
+  poolId          String
+
+  // Timing
+  startTime       DateTime
+  endTime         DateTime
+
+  // Rewards
+  rewardToken     String   // address of reward token
+  totalRewards    String   // total reward amount
+
+  // Formula parameters
+  alpha           Float    @default(1.0) // TWL weight
+  beta            Float    @default(1.0) // Fees weight
+  gamma           Float    @default(1.0) // Concentration weight
+  delta           Float    @default(1.0) // Balance weight
+
+  // Constraints (optional)
+  minTickRange    Int?     // minimum tick range for eligibility
+  maxTickRange    Int?     // maximum tick range for eligibility
+  requiredHook    String?  // specific hook address required (V4-specific)
+  hookBonusMultiplier Float @default(1.0) // bonus for using required hook
+
+  // Status
+  status          CampaignStatus @default(PENDING)
+
+  // Merkle distribution
+  merkleRoot      String?  // Merkle root for claiming
+  merkleTreeIpfs  String?  // IPFS hash of full tree data
+
+  // Metadata
+  createdAt       DateTime @default(now())
+  createdBy       String   // address that created campaign
+  updatedAt       DateTime @updatedAt
+
+  // Relations
+  pool            Pool     @relation(fields: [poolId], references: [id], onDelete: Cascade)
+  distributions   RewardDistribution[]
+  epochs          CampaignEpoch[]
+
+  @@index([poolId])
+  @@index([status])
+  @@index([startTime, endTime])
+}
+
+enum CampaignStatus {
+  PENDING      // not started yet
+  ACTIVE       // currently running
+  CALCULATING  // rewards being calculated
+  DISTRIBUTING // merkle tree generated, ready to claim
+  COMPLETED    // fully distributed
+  CANCELLED    // cancelled by creator
+}
+
+model CampaignEpoch {
+  id              String   @id @default(cuid())
+
+  campaignId      String
+  epochNumber     Int      // sequential epoch number (0, 1, 2...)
+
+  // Timing
+  startTime       DateTime
+  endTime         DateTime
+
+  // Snapshot data
+  snapshotBlock   BigInt   // block number of snapshot
+  totalScore      String   // sum of all scores
+
+  // Distribution
+  merkleRoot      String?
+  merkleTreeIpfs  String?
+
+  // Status
+  calculated      Boolean  @default(false)
+  distributedAt   DateTime?
+
+  createdAt       DateTime @default(now())
+
+  // Relations
+  campaign        Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  distributions   RewardDistribution[]
+
+  @@unique([campaignId, epochNumber])
+  @@index([campaignId])
+}
+
+model RewardDistribution {
+  id              String   @id @default(cuid())
+
+  // References
+  campaignId      String
+  epochId         String?  // null if campaign has single epoch
+  positionId      String
+  userAddress     String
+
+  // Calculated metrics
+  timeWeightedLiquidity String // TWL for this position
+  feesGenerated   String   // total fees attributed to position
+  concentrationFactor Float // calculated concentration score
+  balanceFactor   Float    // calculated balance score
+  hookBonus       Float    @default(1.0) // hook bonus multiplier
+
+  // Score & reward
+  score           String   // final calculated score
+  rewardAmount    String   // reward tokens earned
+
+  // Claiming
+  claimed         Boolean  @default(false)
+  claimedAt       DateTime?
+  claimTxHash     String?
+
+  createdAt       DateTime @default(now())
+
+  // Relations
+  campaign        Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  epoch           CampaignEpoch? @relation(fields: [epochId], references: [id], onDelete: Cascade)
+  position        Position @relation(fields: [positionId], references: [id], onDelete: Cascade)
+
+  @@unique([campaignId, epochId, positionId])
+  @@index([campaignId])
+  @@index([userAddress])
+  @@index([claimed])
+  @@index([userAddress, campaignId])
+}
+
+// ============================================
+// SNAPSHOTS & HISTORICAL TRACKING
+// ============================================
+
+model PositionSnapshot {
+  id              String   @id @default(cuid())
+
+  positionId      String
+  timestamp       DateTime
+  blockNumber     BigInt
+
+  // Position state at snapshot time
+  liquidity       String
+  tickLower       Int
+  tickUpper       Int
+
+  // Pool state at snapshot
+  poolSqrtPriceX96 String
+  poolTick        Int
+  inRange         Boolean  // whether position was in range
+
+  // Accumulated fees (for TWL calculation)
+  feesEarned0     String   @default("0")
+  feesEarned1     String   @default("0")
+
+  // Relations
+  position        Position @relation(fields: [positionId], references: [id], onDelete: Cascade)
+
+  @@index([positionId])
+  @@index([timestamp])
+  @@index([positionId, timestamp])
+}
+
+// ============================================
+// TOKEN METADATA (for USD calculations)
+// ============================================
+
+model Token {
+  address         String   @id
+
+  symbol          String
+  name            String
+  decimals        Int
+
+  // Price tracking (oracle or DEX price)
+  priceUSD        String   @default("0")
+  priceUpdatedAt  DateTime @default(now())
+
+  // Metadata
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([symbol])
+}
+
+// ============================================
+// SYSTEM METADATA
+// ============================================
+
+model IndexerState {
+  id              String   @id @default("singleton")
+
+  // Current indexing progress
+  lastIndexedBlock BigInt
+  lastIndexedTimestamp DateTime
+
+  // Chain info
+  chainId         Int
+
+  // Sync status
+  isSyncing       Boolean  @default(false)
+  syncStartedAt   DateTime?
+
+  updatedAt       DateTime @updatedAt
+}
